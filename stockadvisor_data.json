@@ -1,0 +1,27 @@
+{
+  "guest_sessions": [
+    {
+      "guest_id": "340f7416",
+      "guest_email": "guest_340f7416@stockadvisor.demo",
+      "created_at": "2026-01-01T19:06:54.081681",
+      "device_info": {
+        "user_agent": "Test Browser",
+        "platform": "Windows",
+        "language": "en",
+        "screen_width": 1920,
+        "screen_height": 1080,
+        "timezone": "Asia/Kolkata"
+      },
+      "location_info": {
+        "ip_address": "87.58.80.183",
+        "city": "Tel Aviv",
+        "country": "Israel",
+        "latitude": 32.08088,
+        "longitude": 34.78057
+      }
+    }
+  ],
+  "feedback": [],
+  "registered_users": {},
+  "saved_at": "2026-01-01T21:06:54.081726"
+}

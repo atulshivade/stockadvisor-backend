@@ -27,6 +27,36 @@ import uvicorn
 SECRET_KEY = os.getenv("SECRET_KEY", "stockadvisor-secret-key-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
+DATA_PERSIST_FILE = os.getenv("DATA_PERSIST_FILE", "stockadvisor_data.json")
+
+# ============== Data Persistence Functions ==============
+def save_persistent_data():
+    """Save guest sessions and feedback to file for persistence across restarts"""
+    try:
+        data = {
+            "guest_sessions": guest_sessions_db,
+            "feedback": feedback_db,
+            "registered_users": {k: {**v, "password": "***"} for k, v in users_db.items() if k != ADMIN_EMAIL and not k.startswith("guest_")},
+            "saved_at": datetime.now().isoformat()
+        }
+        with open(DATA_PERSIST_FILE, 'w') as f:
+            json.dump(data, f, indent=2, default=str)
+        logger.info(f"Data saved: {len(guest_sessions_db)} guest sessions, {len(feedback_db)} feedback items")
+    except Exception as e:
+        logger.error(f"Failed to save data: {e}")
+
+def load_persistent_data():
+    """Load guest sessions and feedback from file on startup"""
+    global guest_sessions_db, feedback_db
+    try:
+        if os.path.exists(DATA_PERSIST_FILE):
+            with open(DATA_PERSIST_FILE, 'r') as f:
+                data = json.load(f)
+            guest_sessions_db.extend(data.get("guest_sessions", []))
+            feedback_db.extend(data.get("feedback", []))
+            logger.info(f"Data loaded: {len(guest_sessions_db)} guest sessions, {len(feedback_db)} feedback items")
+    except Exception as e:
+        logger.error(f"Failed to load data: {e}")
 
 # HARDCODED: Only this email has admin access
 ADMIN_EMAIL = "atul.shivade@gmail.com"
@@ -466,6 +496,18 @@ def get_quote(symbol: str, exchange: str = "US") -> dict:
 app = FastAPI(title="StockAdvisor API", version="7.0.0", description="Developed by Atul Shivade @2026")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
+@app.on_event("startup")
+async def startup_event():
+    """Load persistent data on server startup"""
+    load_persistent_data()
+    logger.info(f"Server started. Admin: {ADMIN_EMAIL}, Guest Sessions: {len(guest_sessions_db)}, Feedback: {len(feedback_db)}")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Save data on server shutdown"""
+    save_persistent_data()
+    logger.info("Server shutdown. Data saved.")
+
 @app.get("/")
 async def root():
     return {"name": "StockAdvisor API", "version": "7.0.0", "developer": "Atul Shivade @2026", "contact": "atul.shivade@gmail.com"}
@@ -614,6 +656,9 @@ async def guest_login(device_info: Optional[GuestDeviceInfo] = None, request: Re
         "location_info": location_info
     }
     guest_sessions_db.append(session_data)
+    
+    # Save to persistent storage
+    save_persistent_data()
     
     init_user_data(guest_email)
     return TokenResponse(access_token=create_access_token({"sub": guest_email}))
@@ -768,6 +813,10 @@ async def create_feedback(item: FeedbackCreate, user: dict = Depends(get_current
         "created_at": datetime.utcnow().isoformat(), "updated_at": datetime.utcnow().isoformat()
     }
     feedback_db.append(entry)
+    
+    # Save to persistent storage
+    save_persistent_data()
+    
     return {"message": "Feedback submitted", "feedback": entry}
 
 @app.put("/api/v1/feedback/{feedback_id}")
@@ -1411,18 +1460,36 @@ async def run_sanity_tests(user: dict = Depends(get_current_user)):
     except:
         await run_test("Feedback Status Types", False)
     
-    # Test 35: Data Cleanup
+    # Test 35: Data Cleanup (ONLY removes test data, NEVER admin/guest/sample data)
     try:
-        if test_email in users_db: del users_db[test_email]
-        if test_email in portfolios_db: del portfolios_db[test_email]
-        if test_email in watchlists_db: del watchlists_db[test_email]
-        if test_email in stock_alerts_db: del stock_alerts_db[test_email]
-        # Remove test feedback entries
-        feedback_to_remove = [f for f in feedback_db if f.get("user_email") == test_email]
-        for f in feedback_to_remove: feedback_db.remove(f)
-        await run_test("Test Data Cleanup", test_email not in users_db)
+        # Protected emails that should NEVER be cleaned
+        protected_emails = [ADMIN_EMAIL, "system@stockadvisor.app"]
+        
+        # Only clean up the temporary test user (sanity_test_xxx@test.com)
+        if test_email in users_db and test_email not in protected_emails:
+            del users_db[test_email]
+        if test_email in portfolios_db and test_email not in protected_emails:
+            del portfolios_db[test_email]
+        if test_email in watchlists_db and test_email not in protected_emails:
+            del watchlists_db[test_email]
+        if test_email in stock_alerts_db and test_email not in protected_emails:
+            del stock_alerts_db[test_email]
+        
+        # Remove ONLY test feedback entries (not admin or real user feedback)
+        feedback_to_remove = [f for f in feedback_db if f.get("user_email") == test_email and test_email not in protected_emails]
+        for f in feedback_to_remove: 
+            feedback_db.remove(f)
+        
+        # NEVER touch guest_sessions_db - preserve all guest session history
+        # guest_sessions_db is NOT cleaned
+        
+        # Verify admin data is intact
+        admin_intact = ADMIN_EMAIL in users_db
+        test_cleaned = test_email not in users_db
+        
+        await run_test("Test Data Cleanup (Admin Protected)", admin_intact and test_cleaned)
     except:
-        await run_test("Test Data Cleanup", False)
+        await run_test("Test Data Cleanup (Admin Protected)", False)
     
     # Summary
     passed = sum(1 for r in sanity_results if r["status"] == "PASS")
@@ -1461,6 +1528,14 @@ if __name__ == "__main__":
     print("  Contact: atul.shivade@gmail.com")
     print("="*50)
     print(f"  Admin: {ADMIN_EMAIL}")
+    print(f"  Password: admin123")
     print("  Server: http://localhost:8000")
+    print("="*50)
+    
+    # Load persisted data on startup
+    load_persistent_data()
+    print(f"  Guest Sessions: {len(guest_sessions_db)}")
+    print(f"  Feedback Items: {len(feedback_db)}")
     print("="*50 + "\n")
+    
     uvicorn.run(app, host="0.0.0.0", port=8000)
