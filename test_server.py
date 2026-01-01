@@ -425,7 +425,14 @@ def search_yahoo(query: str) -> list:
         results = []
         for q in data.get('quotes', []):
             if q.get('quoteType') in ['EQUITY', 'ETF']:
-                results.append({'symbol': q.get('symbol', '').split('.')[0], 'name': q.get('longname') or q.get('shortname', ''), 'exchange': q.get('exchange', ''), 'logo': '📈'})
+                symbol = q.get('symbol', '').split('.')[0]
+                results.append({
+                    'symbol': symbol, 
+                    'name': q.get('longname') or q.get('shortname', ''), 
+                    'exchange': q.get('exchange', ''),
+                    'sector': q.get('sector') or q.get('industry') or STOCK_INFO.get(symbol, {}).get('sector', ''),
+                    'logo': STOCK_INFO.get(symbol, {}).get('logo', '📈')
+                })
         search_cache[cache_key] = results
         return results
     except: return []
@@ -460,10 +467,54 @@ def fetch_quote(symbol: str, exchange: str = "US") -> Optional[dict]:
     except: pass
     return None
 
+def fetch_stock_info(symbol: str, exchange: str = "US") -> dict:
+    """Fetch additional stock info (name, sector) from Yahoo Finance search API"""
+    # First check local STOCK_INFO database
+    if symbol in STOCK_INFO:
+        return STOCK_INFO[symbol]
+    
+    try:
+        # Use search API which returns sector info without auth
+        url = f"https://query1.finance.yahoo.com/v1/finance/search?q={symbol}&quotesCount=5&newsCount=0"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=5, context=ssl_context) as response:
+            data = json.loads(response.read().decode())
+        
+        # Find the exact match or best match
+        for q in data.get('quotes', []):
+            q_symbol = q.get('symbol', '').split('.')[0].upper()
+            if q_symbol == symbol.upper():
+                return {
+                    "name": q.get('longname') or q.get('shortname') or symbol,
+                    "sector": q.get('sector') or q.get('sectorDisp') or q.get('industry') or q.get('industryDisp') or '',
+                    "industry": q.get('industry') or q.get('industryDisp') or '',
+                    "logo": '📈'
+                }
+        
+        # If no exact match, return first result
+        if data.get('quotes'):
+            q = data['quotes'][0]
+            return {
+                "name": q.get('longname') or q.get('shortname') or symbol,
+                "sector": q.get('sector') or q.get('sectorDisp') or q.get('industry') or q.get('industryDisp') or '',
+                "industry": q.get('industry') or q.get('industryDisp') or '',
+                "logo": '📈'
+            }
+    except Exception as e:
+        logger.warning(f"Failed to fetch stock info for {symbol}: {e}")
+    
+    return {"name": symbol, "sector": "", "logo": "📈"}
+
 def get_quote(symbol: str, exchange: str = "US") -> dict:
     symbol = symbol.upper()
     ex_info = EXCHANGES.get(exchange, EXCHANGES["US"])
-    info = STOCK_INFO.get(symbol, {"name": symbol, "sector": "Unknown", "logo": "📈"})
+    
+    # First check local STOCK_INFO, then fetch from Yahoo if not found
+    if symbol in STOCK_INFO:
+        info = STOCK_INFO[symbol]
+    else:
+        info = fetch_stock_info(symbol, exchange)
+    
     live = fetch_quote(symbol, exchange)
     if live:
         return {
@@ -848,19 +899,17 @@ async def get_alerts(exchange: str = "NSE", user: dict = Depends(get_current_use
     enriched_alerts = []
     for alert in active_alerts:
         symbol = alert["symbol"]
-        suffix = EXCHANGES.get(exchange, {}).get("suffix", "")
-        full_symbol = f"{symbol}{suffix}"
         
-        # Get current price
+        # Get REAL-TIME current price using fetch_quote (it handles suffix internally)
         current_price = alert.get("entry_price", 0)
         try:
-            quote = fetch_quote(full_symbol)
-            if quote:
-                current_price = quote.get("regularMarketPrice", alert.get("entry_price", 0))
-        except:
-            pass
+            quote = fetch_quote(symbol, exchange)  # Pass exchange, not full_symbol
+            if quote and quote.get("current_price"):
+                current_price = quote.get("current_price")
+        except Exception as e:
+            logger.warning(f"Failed to fetch quote for {symbol}: {e}")
         
-        # Calculate potential return
+        # Calculate potential return from CURRENT price to target
         target_price = alert.get("target_price", 0)
         entry_price = alert.get("entry_price", 1)
         potential_return = ((target_price - current_price) / current_price * 100) if current_price > 0 else 0
@@ -870,7 +919,7 @@ async def get_alerts(exchange: str = "NSE", user: dict = Depends(get_current_use
         
         enriched_alerts.append({
             **alert,
-            "current_price": current_price,
+            "current_price": round(current_price, 2),
             "potential_return": round(potential_return, 2),
             "change_percent": round(change_percent, 2),
             "name": stock_info.get("name", symbol),
@@ -966,16 +1015,15 @@ async def get_all_alerts(exchange: str = "NSE"):
         for alert in alerts:
             if alert.get("exchange") == exchange and alert.get("status", "active") == "active":
                 symbol = alert["symbol"]
-                suffix = EXCHANGES.get(exchange, {}).get("suffix", "")
-                full_symbol = f"{symbol}{suffix}"
                 
+                # Get REAL-TIME current price
                 current_price = alert.get("entry_price", 0)
                 try:
-                    quote = fetch_quote(full_symbol)
-                    if quote:
-                        current_price = quote.get("regularMarketPrice", alert.get("entry_price", 0))
-                except:
-                    pass
+                    quote = fetch_quote(symbol, exchange)  # Pass exchange, not full_symbol
+                    if quote and quote.get("current_price"):
+                        current_price = quote.get("current_price")
+                except Exception as e:
+                    logger.warning(f"Failed to fetch quote for {symbol}: {e}")
                 
                 target_price = alert.get("target_price", 0)
                 entry_price = alert.get("entry_price", 1)
@@ -986,7 +1034,7 @@ async def get_all_alerts(exchange: str = "NSE"):
                 
                 all_alerts.append({
                     **alert,
-                    "current_price": current_price,
+                    "current_price": round(current_price, 2),
                     "potential_return": round(potential_return, 2),
                     "change_percent": round(change_percent, 2),
                     "name": stock_info.get("name", symbol),
