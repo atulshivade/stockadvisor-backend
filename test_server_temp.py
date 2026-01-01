@@ -15,7 +15,7 @@ import threading
 import secrets
 import string
 
-from fastapi import FastAPI, HTTPException, Depends, Query, Request
+from fastapi import FastAPI, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
@@ -164,25 +164,11 @@ class FeedbackUpdate(BaseModel):
 class PasswordReset(BaseModel):
     new_password: str
 
-class GuestDeviceInfo(BaseModel):
-    user_agent: Optional[str] = None
-    platform: Optional[str] = None
-    language: Optional[str] = None
-    screen_width: Optional[int] = None
-    screen_height: Optional[int] = None
-    timezone: Optional[str] = None
-    ip_address: Optional[str] = None
-    city: Optional[str] = None
-    country: Optional[str] = None
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
-
 # ============== Database ==============
 users_db: Dict[str, dict] = {}
 portfolios_db: Dict[str, Dict[str, List[dict]]] = {}
 watchlists_db: Dict[str, Dict[str, List[str]]] = {}
 feedback_db: List[dict] = []
-guest_sessions_db: List[dict] = []  # Store guest session details
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
@@ -390,90 +376,6 @@ async def get_me(user: dict = Depends(get_current_user)):
         "email": user["email"], "first_name": user["first_name"], "last_name": user["last_name"],
         "is_admin": is_admin(user), "sso_provider": user.get("sso_provider")
     }
-
-def fetch_ip_location(client_ip: str = None) -> dict:
-    """Fetch location from IP using multiple services"""
-    location = {"ip_address": client_ip, "city": None, "country": None, "latitude": None, "longitude": None}
-    services = [
-        ("https://ipapi.co/json/", lambda d: {"ip": d.get("ip"), "city": d.get("city"), "country": d.get("country_name"), "lat": d.get("latitude"), "lon": d.get("longitude")}),
-        ("http://ip-api.com/json/", lambda d: {"ip": d.get("query"), "city": d.get("city"), "country": d.get("country"), "lat": d.get("lat"), "lon": d.get("lon")}),
-    ]
-    for url, parser in services:
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=3, context=ssl_context) as response:
-                data = json.loads(response.read().decode())
-                parsed = parser(data)
-                if parsed.get("city") and parsed.get("country"):
-                    location["ip_address"] = parsed.get("ip") or client_ip
-                    location["city"] = parsed["city"]
-                    location["country"] = parsed["country"]
-                    location["latitude"] = parsed.get("lat")
-                    location["longitude"] = parsed.get("lon")
-                    break
-        except Exception as e:
-            continue
-    return location
-
-@app.post("/api/v1/auth/guest", response_model=TokenResponse)
-async def guest_login(device_info: Optional[GuestDeviceInfo] = None, request: Request = None):
-    """Create a temporary guest account with device/location tracking"""
-    
-    guest_id = secrets.token_hex(4)
-    guest_email = f"guest_{guest_id}@stockadvisor.demo"
-    guest_password = generate_temp_password()
-    
-    # Create guest user
-    users_db[guest_email] = {
-        "email": guest_email, "password": guest_password,
-        "first_name": "Guest", "last_name": f"User",
-        "created_at": datetime.utcnow().isoformat(),
-        "is_active": True, "sso_provider": "guest", "login_issues": None
-    }
-    
-    # Get client IP from request
-    client_ip = None
-    if request:
-        client_ip = request.client.host if request.client else None
-        # Check for forwarded IP (behind proxy)
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            client_ip = forwarded.split(",")[0].strip()
-    
-    # Fetch location from server-side if client didn't provide it
-    location_info = {
-        "ip_address": device_info.ip_address if device_info and device_info.ip_address else client_ip,
-        "city": device_info.city if device_info else None,
-        "country": device_info.country if device_info else None,
-        "latitude": device_info.latitude if device_info else None,
-        "longitude": device_info.longitude if device_info else None,
-    }
-    
-    # If no city/country from client, fetch from server
-    if not location_info["city"] or not location_info["country"]:
-        server_location = fetch_ip_location(client_ip)
-        if server_location["city"]:
-            location_info = server_location
-    
-    # Store guest session with device info
-    session_data = {
-        "guest_id": guest_id,
-        "guest_email": guest_email,
-        "created_at": datetime.utcnow().isoformat(),
-        "device_info": {
-            "user_agent": device_info.user_agent if device_info else None,
-            "platform": device_info.platform if device_info else None,
-            "language": device_info.language if device_info else None,
-            "screen_width": device_info.screen_width if device_info else None,
-            "screen_height": device_info.screen_height if device_info else None,
-            "timezone": device_info.timezone if device_info else None,
-        } if device_info else {},
-        "location_info": location_info
-    }
-    guest_sessions_db.append(session_data)
-    
-    init_user_data(guest_email)
-    return TokenResponse(access_token=create_access_token({"sub": guest_email}))
 
 # ============== Stocks ==============
 @app.get("/api/v1/stocks/search")
@@ -683,21 +585,7 @@ async def get_stats(user: dict = Depends(get_current_user)):
     stats = {"new": 0, "in_progress": 0, "resolved": 0, "closed": 0}
     for f in feedback_db: stats[f["status"]] = stats.get(f["status"], 0) + 1
     users_with_issues = sum(1 for u in users_db.values() if u.get("login_issues"))
-    guest_count = sum(1 for u in users_db.values() if u.get("sso_provider") == "guest")
-    return {
-        "total_users": len(users_db), "total_feedback": len(feedback_db), 
-        "feedback_stats": stats, "users_with_login_issues": users_with_issues,
-        "guest_sessions": len(guest_sessions_db), "guest_users": guest_count
-    }
-
-@app.get("/api/v1/admin/guest-sessions")
-async def get_guest_sessions(user: dict = Depends(get_current_user)):
-    """Get all guest session details for admin"""
-    if not is_admin(user): raise HTTPException(status_code=403, detail="Admin access required")
-    return {
-        "sessions": sorted(guest_sessions_db, key=lambda x: x["created_at"], reverse=True),
-        "total": len(guest_sessions_db)
-    }
+    return {"total_users": len(users_db), "total_feedback": len(feedback_db), "feedback_stats": stats, "users_with_login_issues": users_with_issues}
 
 # ============== OAuth SSO ==============
 oauth_states: Dict[str, dict] = {}
