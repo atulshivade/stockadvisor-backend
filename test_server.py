@@ -177,12 +177,92 @@ class GuestDeviceInfo(BaseModel):
     latitude: Optional[float] = None
     longitude: Optional[float] = None
 
+class StockAlertCreate(BaseModel):
+    symbol: str
+    entry_price: float
+    stop_loss: float
+    target_price: float
+    rationale: Optional[str] = None
+    exchange: str = "NSE"
+
+class StockAlertUpdate(BaseModel):
+    entry_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    target_price: Optional[float] = None
+    rationale: Optional[str] = None
+    status: Optional[str] = None  # active, hit_target, hit_sl, cancelled
+
 # ============== Database ==============
 users_db: Dict[str, dict] = {}
 portfolios_db: Dict[str, Dict[str, List[dict]]] = {}
 watchlists_db: Dict[str, Dict[str, List[str]]] = {}
 feedback_db: List[dict] = []
 guest_sessions_db: List[dict] = []  # Store guest session details
+stock_alerts_db: Dict[str, List[dict]] = {
+    # Sample alerts to show the feature
+    "system@stockadvisor.app": [
+        {
+            "id": "sample-1",
+            "symbol": "RELIANCE",
+            "entry_price": 2850.00,
+            "stop_loss": 2750.00,
+            "target_price": 3150.00,
+            "rationale": "Strong quarterly results with improving refinery margins. Technical breakout above key resistance level.",
+            "exchange": "NSE",
+            "status": "active",
+            "created_at": datetime.now().isoformat(),
+            "created_by": "system@stockadvisor.app"
+        },
+        {
+            "id": "sample-2",
+            "symbol": "TCS",
+            "entry_price": 3950.00,
+            "stop_loss": 3800.00,
+            "target_price": 4300.00,
+            "rationale": "IT sector recovery expected. Strong order book and deal wins in Q3.",
+            "exchange": "NSE",
+            "status": "active",
+            "created_at": datetime.now().isoformat(),
+            "created_by": "system@stockadvisor.app"
+        },
+        {
+            "id": "sample-3",
+            "symbol": "ICICIBANK",
+            "entry_price": 1050.00,
+            "stop_loss": 1000.00,
+            "target_price": 1180.00,
+            "rationale": "Banking sector strength with improving NII margins. Bullish chart pattern formation.",
+            "exchange": "NSE",
+            "status": "active",
+            "created_at": datetime.now().isoformat(),
+            "created_by": "system@stockadvisor.app"
+        },
+        {
+            "id": "sample-4",
+            "symbol": "NVDA",
+            "entry_price": 135.00,
+            "stop_loss": 125.00,
+            "target_price": 160.00,
+            "rationale": "AI demand continues to surge. Strong data center growth momentum.",
+            "exchange": "US",
+            "status": "active",
+            "created_at": datetime.now().isoformat(),
+            "created_by": "system@stockadvisor.app"
+        },
+        {
+            "id": "sample-5",
+            "symbol": "AAPL",
+            "entry_price": 190.00,
+            "stop_loss": 180.00,
+            "target_price": 215.00,
+            "rationale": "iPhone 16 launch expected to drive growth. Services revenue at all-time high.",
+            "exchange": "US",
+            "status": "active",
+            "created_at": datetime.now().isoformat(),
+            "created_by": "system@stockadvisor.app"
+        }
+    ]
+}  # User email -> list of stock alerts
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
@@ -642,6 +722,156 @@ async def delete_feedback(feedback_id: str, user: dict = Depends(get_current_use
     global feedback_db
     feedback_db = [f for f in feedback_db if f["id"] != feedback_id]
     return {"message": "Deleted"}
+
+# ============== Stock Alerts ==============
+@app.get("/api/v1/alerts")
+async def get_alerts(exchange: str = "NSE", user: dict = Depends(get_current_user)):
+    """Get all stock alerts for current user"""
+    email = user["email"]
+    user_alerts = stock_alerts_db.get(email, [])
+    # Filter by exchange and active status
+    active_alerts = [a for a in user_alerts if a.get("exchange") == exchange and a.get("status", "active") == "active"]
+    
+    # Enrich with current price data
+    enriched_alerts = []
+    for alert in active_alerts:
+        symbol = alert["symbol"]
+        suffix = EXCHANGES.get(exchange, {}).get("suffix", "")
+        full_symbol = f"{symbol}{suffix}"
+        
+        # Get current price
+        current_price = alert.get("entry_price", 0)
+        try:
+            quote = fetch_quote(full_symbol)
+            if quote:
+                current_price = quote.get("regularMarketPrice", alert.get("entry_price", 0))
+        except:
+            pass
+        
+        # Calculate potential return
+        target_price = alert.get("target_price", 0)
+        entry_price = alert.get("entry_price", 1)
+        potential_return = ((target_price - current_price) / current_price * 100) if current_price > 0 else 0
+        change_percent = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+        
+        stock_info = STOCK_INFO.get(symbol, {"name": symbol, "sector": "", "logo": "📈"})
+        
+        enriched_alerts.append({
+            **alert,
+            "current_price": current_price,
+            "potential_return": round(potential_return, 2),
+            "change_percent": round(change_percent, 2),
+            "name": stock_info.get("name", symbol),
+            "logo": stock_info.get("logo", "📈")
+        })
+    
+    return {"alerts": enriched_alerts}
+
+@app.post("/api/v1/alerts")
+async def create_alert(alert: StockAlertCreate, user: dict = Depends(get_current_user)):
+    """Create a new stock alert"""
+    email = user["email"]
+    
+    if email not in stock_alerts_db:
+        stock_alerts_db[email] = []
+    
+    # Validate prices
+    if alert.stop_loss >= alert.entry_price:
+        raise HTTPException(status_code=400, detail="Stop loss must be below entry price")
+    if alert.target_price <= alert.entry_price:
+        raise HTTPException(status_code=400, detail="Target price must be above entry price")
+    
+    new_alert = {
+        "id": str(uuid.uuid4()),
+        "symbol": alert.symbol.upper(),
+        "entry_price": alert.entry_price,
+        "stop_loss": alert.stop_loss,
+        "target_price": alert.target_price,
+        "rationale": alert.rationale or f"Technical analysis suggests {alert.symbol} has potential upside.",
+        "exchange": alert.exchange,
+        "status": "active",
+        "created_at": datetime.now().isoformat(),
+        "created_by": email
+    }
+    
+    stock_alerts_db[email].append(new_alert)
+    return {"message": "Alert created", "alert": new_alert}
+
+@app.put("/api/v1/alerts/{alert_id}")
+async def update_alert(alert_id: str, update: StockAlertUpdate, user: dict = Depends(get_current_user)):
+    """Update a stock alert"""
+    email = user["email"]
+    user_alerts = stock_alerts_db.get(email, [])
+    
+    for alert in user_alerts:
+        if alert["id"] == alert_id:
+            if update.entry_price is not None:
+                alert["entry_price"] = update.entry_price
+            if update.stop_loss is not None:
+                alert["stop_loss"] = update.stop_loss
+            if update.target_price is not None:
+                alert["target_price"] = update.target_price
+            if update.rationale is not None:
+                alert["rationale"] = update.rationale
+            if update.status is not None:
+                alert["status"] = update.status
+            alert["updated_at"] = datetime.now().isoformat()
+            return {"message": "Alert updated", "alert": alert}
+    
+    raise HTTPException(status_code=404, detail="Alert not found")
+
+@app.delete("/api/v1/alerts/{alert_id}")
+async def delete_alert(alert_id: str, user: dict = Depends(get_current_user)):
+    """Delete a stock alert"""
+    email = user["email"]
+    if email not in stock_alerts_db:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    
+    original_count = len(stock_alerts_db[email])
+    stock_alerts_db[email] = [a for a in stock_alerts_db[email] if a["id"] != alert_id]
+    
+    if len(stock_alerts_db[email]) == original_count:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    
+    return {"message": "Alert deleted"}
+
+@app.get("/api/v1/alerts/all")
+async def get_all_alerts(exchange: str = "NSE"):
+    """Get all public stock alerts (no auth required for viewing)"""
+    all_alerts = []
+    for email, alerts in stock_alerts_db.items():
+        for alert in alerts:
+            if alert.get("exchange") == exchange and alert.get("status", "active") == "active":
+                symbol = alert["symbol"]
+                suffix = EXCHANGES.get(exchange, {}).get("suffix", "")
+                full_symbol = f"{symbol}{suffix}"
+                
+                current_price = alert.get("entry_price", 0)
+                try:
+                    quote = fetch_quote(full_symbol)
+                    if quote:
+                        current_price = quote.get("regularMarketPrice", alert.get("entry_price", 0))
+                except:
+                    pass
+                
+                target_price = alert.get("target_price", 0)
+                entry_price = alert.get("entry_price", 1)
+                potential_return = ((target_price - current_price) / current_price * 100) if current_price > 0 else 0
+                change_percent = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+                
+                stock_info = STOCK_INFO.get(symbol, {"name": symbol, "sector": "", "logo": "📈"})
+                
+                all_alerts.append({
+                    **alert,
+                    "current_price": current_price,
+                    "potential_return": round(potential_return, 2),
+                    "change_percent": round(change_percent, 2),
+                    "name": stock_info.get("name", symbol),
+                    "logo": stock_info.get("logo", "📈"),
+                    "created_by_name": "Trader Smith"  # Anonymize creator
+                })
+    
+    return {"alerts": sorted(all_alerts, key=lambda x: x.get("created_at", ""), reverse=True)}
 
 # ============== Admin ==============
 @app.get("/api/v1/admin/users")
