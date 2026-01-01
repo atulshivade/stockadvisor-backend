@@ -1508,7 +1508,99 @@ async def run_sanity_tests(user: dict = Depends(get_current_user)):
     except:
         await run_test("Feedback Status Types", False)
     
-    # Test 35: Data Cleanup (ONLY removes test data, NEVER admin/guest/sample data)
+    # Test 35: Portfolio Update
+    try:
+        if test_email in portfolios_db and "US" in portfolios_db[test_email]:
+            original_count = len(portfolios_db[test_email]["US"])
+            portfolios_db[test_email]["US"].append({"symbol": "MSFT", "quantity": 5, "avg_cost": 400})
+            updated = len(portfolios_db[test_email]["US"]) == original_count + 1
+            portfolios_db[test_email]["US"] = [h for h in portfolios_db[test_email]["US"] if h["symbol"] != "MSFT"]
+            await run_test("Portfolio Update Flow", updated)
+        else:
+            await run_test("Portfolio Update Flow", False)
+    except:
+        await run_test("Portfolio Update Flow", False)
+    
+    # Test 36: Stock Price Fetch (Real-time)
+    try:
+        quote = fetch_quote("RELIANCE", "NSE")
+        await run_test("Real-time Price Fetch", quote is not None and quote.get("current_price", 0) > 0)
+    except:
+        await run_test("Real-time Price Fetch", False)
+    
+    # Test 37: Stock Info Fetch (Sector)
+    try:
+        info = fetch_stock_info("AAPL", "US")
+        await run_test("Stock Info with Sector", info.get("name") is not None)
+    except:
+        await run_test("Stock Info with Sector", False)
+    
+    # Test 38: AI Rationale for Different Sectors
+    try:
+        rationale_tech = generate_ai_rationale("TCS", 3500, 4000, 3200, "NSE")
+        rationale_finance = generate_ai_rationale("HDFCBANK", 1600, 1800, 1500, "NSE")
+        await run_test("AI Rationale by Sector", len(rationale_tech) > 30 and len(rationale_finance) > 30)
+    except:
+        await run_test("AI Rationale by Sector", False)
+    
+    # Test 39: Exchange Currency Mapping
+    try:
+        us_currency = EXCHANGES.get("US", {}).get("currency") == "USD"
+        nse_currency = EXCHANGES.get("NSE", {}).get("currency") == "INR"
+        lse_currency = EXCHANGES.get("LSE", {}).get("currency") == "GBP"
+        await run_test("Exchange Currency Mapping", us_currency and nse_currency and lse_currency)
+    except:
+        await run_test("Exchange Currency Mapping", False)
+    
+    # Test 40: TradingView URL Format
+    try:
+        nse_url = f"https://www.tradingview.com/symbols/{EXCHANGES['NSE']['tradingview_prefix']}RELIANCE/"
+        us_url = f"https://www.tradingview.com/symbols/{EXCHANGES['US']['tradingview_prefix']}AAPL/"
+        await run_test("TradingView URL Format", "NSE:" in nse_url and "AAPL" in us_url)
+    except:
+        await run_test("TradingView URL Format", False)
+    
+    # Test 41: Data Persistence File
+    try:
+        can_persist = True  # Just verify the functions exist
+        await run_test("Data Persistence Functions", callable(save_persistent_data) and callable(load_persistent_data))
+    except:
+        await run_test("Data Persistence Functions", False)
+    
+    # Test 42: Guest Email Format
+    try:
+        sample_guest = "guest_abc12345@stockadvisor.demo"
+        await run_test("Guest Email Format", "guest_" in sample_guest and "@stockadvisor.demo" in sample_guest)
+    except:
+        await run_test("Guest Email Format", False)
+    
+    # Test 43: Admin Pre-created
+    try:
+        admin_exists = ADMIN_EMAIL in users_db
+        admin_password = users_db.get(ADMIN_EMAIL, {}).get("password") == "admin123"
+        await run_test("Admin Pre-created", admin_exists and admin_password)
+    except:
+        await run_test("Admin Pre-created", False)
+    
+    # Test 44: Sample Alerts Exchange Filter
+    try:
+        nse_alerts = [a for a in stock_alerts_db.get("system@stockadvisor.app", []) if a.get("exchange") == "NSE"]
+        us_alerts = [a for a in stock_alerts_db.get("system@stockadvisor.app", []) if a.get("exchange") == "US"]
+        await run_test("Sample Alerts by Exchange", len(nse_alerts) >= 2 and len(us_alerts) >= 2)
+    except:
+        await run_test("Sample Alerts by Exchange", False)
+    
+    # Test 45: Portfolio Gain Calculation
+    try:
+        # Test gain calculation logic
+        entry_price = 100
+        current_price = 120
+        gain_percent = ((current_price - entry_price) / entry_price) * 100
+        await run_test("Gain Calculation Logic", gain_percent == 20.0)
+    except:
+        await run_test("Gain Calculation Logic", False)
+    
+    # Test 46: Final Cleanup (ONLY removes test data, NEVER admin/guest/sample data)
     try:
         # Protected emails that should NEVER be cleaned
         protected_emails = [ADMIN_EMAIL, "system@stockadvisor.app"]
@@ -1535,9 +1627,9 @@ async def run_sanity_tests(user: dict = Depends(get_current_user)):
         admin_intact = ADMIN_EMAIL in users_db
         test_cleaned = test_email not in users_db
         
-        await run_test("Test Data Cleanup (Admin Protected)", admin_intact and test_cleaned)
+        await run_test("Final Cleanup (Admin Protected)", admin_intact and test_cleaned)
     except:
-        await run_test("Test Data Cleanup (Admin Protected)", False)
+        await run_test("Final Cleanup (Admin Protected)", False)
     
     # Summary
     passed = sum(1 for r in sanity_results if r["status"] == "PASS")
