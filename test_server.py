@@ -463,20 +463,41 @@ def fetch_quote(symbol: str, exchange: str = "US") -> Optional[dict]:
         if data.get('chart', {}).get('result'):
             result = data['chart']['result'][0]
             meta = result.get('meta', {})
+            
+            # Get current price
             current = meta.get('regularMarketPrice', 0)
-            prev = meta.get('previousClose', current)
+            
+            # Get previous close - try multiple fields (Yahoo returns different fields for different exchanges)
+            prev = meta.get('previousClose') or meta.get('chartPreviousClose') or meta.get('regularMarketPreviousClose') or current
+            
+            # Get open price - fallback to previous close if not available
+            open_price = meta.get('regularMarketOpen') or meta.get('open') or prev
+            
+            # Get day high/low with proper fallbacks
+            day_high = meta.get('regularMarketDayHigh') or meta.get('dayHigh') or current
+            day_low = meta.get('regularMarketDayLow') or meta.get('dayLow') or current
+            
+            # Calculate change
+            change = round(current - prev, 2) if prev else 0
+            change_percent = round(((current - prev) / prev * 100), 2) if prev and prev != 0 else 0
+            
             stock_data = {
-                'symbol': symbol, 'current_price': round(current, 2), 'previous_close': round(prev, 2),
-                'change': round(current - prev, 2), 'change_percent': round(((current - prev) / prev * 100) if prev else 0, 2),
-                'day_high': round(meta.get('regularMarketDayHigh', current * 1.01), 2),
-                'day_low': round(meta.get('regularMarketDayLow', current * 0.99), 2),
-                'open_price': round(meta.get('regularMarketOpen', current), 2),
-                'volume': int(meta.get('regularMarketVolume', 0)), 'is_live': True
+                'symbol': symbol, 
+                'current_price': round(current, 2), 
+                'previous_close': round(prev, 2),
+                'change': change, 
+                'change_percent': change_percent,
+                'day_high': round(day_high, 2),
+                'day_low': round(day_low, 2),
+                'open_price': round(open_price, 2),
+                'volume': int(meta.get('regularMarketVolume', 0)), 
+                'is_live': True
             }
             stock_cache[cache_key] = stock_data
             cache_expiry[cache_key] = datetime.utcnow() + CACHE_DURATION
             return stock_data
-    except: pass
+    except Exception as e:
+        logger.warning(f"fetch_quote error for {symbol}: {e}")
     return None
 
 def fetch_stock_info(symbol: str, exchange: str = "US") -> dict:
