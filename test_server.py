@@ -70,7 +70,8 @@ ssl_context.verify_mode = ssl.CERT_NONE
 stock_cache: Dict[str, dict] = {}
 cache_expiry: Dict[str, datetime] = {}
 search_cache: Dict[str, list] = {}
-CACHE_DURATION = timedelta(seconds=30)
+CACHE_DURATION = timedelta(seconds=15)  # Reduced for more real-time data
+SEARCH_CACHE_DURATION = timedelta(minutes=5)  # Search results can be cached longer
 executor = ThreadPoolExecutor(max_workers=10)
 
 # ============== Stock Exchanges ==============
@@ -418,24 +419,35 @@ def search_yahoo(query: str) -> list:
     try:
         cache_key = f"search:{query.upper()}"
         if cache_key in search_cache: return search_cache[cache_key]
-        url = f"https://query1.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=12&newsCount=0"
+        
+        # URL encode the query for special characters and spaces
+        encoded_query = urllib.request.quote(query)
+        url = f"https://query1.finance.yahoo.com/v1/finance/search?q={encoded_query}&quotesCount=20&newsCount=0"
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=5, context=ssl_context) as response:
+        with urllib.request.urlopen(req, timeout=8, context=ssl_context) as response:
             data = json.loads(response.read().decode())
         results = []
         for q in data.get('quotes', []):
             if q.get('quoteType') in ['EQUITY', 'ETF']:
-                symbol = q.get('symbol', '').split('.')[0]
+                full_symbol = q.get('symbol', '')
+                # Extract base symbol without suffix for display
+                base_symbol = full_symbol.split('.')[0]
+                exchange_code = q.get('exchDisp', '') or q.get('exchange', '')
+                
                 results.append({
-                    'symbol': symbol, 
+                    'symbol': base_symbol,
+                    'full_symbol': full_symbol,  # Keep full symbol for API calls
                     'name': q.get('longname') or q.get('shortname', ''), 
-                    'exchange': q.get('exchange', ''),
-                    'sector': q.get('sector') or q.get('industry') or STOCK_INFO.get(symbol, {}).get('sector', ''),
-                    'logo': STOCK_INFO.get(symbol, {}).get('logo', '📈')
+                    'exchange': exchange_code,
+                    'sector': q.get('sector') or q.get('sectorDisp') or q.get('industry') or q.get('industryDisp') or STOCK_INFO.get(base_symbol, {}).get('sector', ''),
+                    'industry': q.get('industry') or q.get('industryDisp') or '',
+                    'logo': STOCK_INFO.get(base_symbol, {}).get('logo', '📈')
                 })
         search_cache[cache_key] = results
         return results
-    except: return []
+    except Exception as e:
+        logger.warning(f"Search error for '{query}': {e}")
+        return []
 
 def fetch_quote(symbol: str, exchange: str = "US") -> Optional[dict]:
     try:
